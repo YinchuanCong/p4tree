@@ -211,6 +211,10 @@ class DNNClassifier(nn.Module):
             grdtruth = grdtruth.squeeze().data.cpu().tolist()
         print(f1_score(grdtruth,pred,average='weighted'))
         print(classification_report(grdtruth,pred))
+        
+    def _nonsemi_decisiontree(self):
+        pass                           
+        
 
 
 if __name__ =='__main__':

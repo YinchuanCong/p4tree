@@ -21,13 +21,34 @@ import time
 from sklearn.tree import DecisionTreeClassifier
 from decistirontree import SoftLabelDecisionTree
 from decisionTree.SoftTree import SoftTreeClassifier
+from sklearn.tree import DecisionTreeRegressor
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)    
 # from utils.util import TabularDataset,SimpleMLP,LSTM,GRU
 # from utils.util import update_ema,pseudo_labeling,select_features 
 import tensorboardX
+import random
 
+from softcart.cart import SoftCARTClassifier
+
+def set_seed(seed=42):
+    # Python 原生 random 模块
+    random.seed(seed)
+
+    # NumPy 随机种子
+    np.random.seed(seed)
+
+    # PyTorch 随机种子（CPU）
+    torch.manual_seed(seed)
+
+    # PyTorch 随机种子（GPU）【如果用 CUDA 的话】
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # 多GPU时也设置
+
+    # 为了确保PyTorch的计算结果可复现（强烈推荐）
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 class TabularDataset(Dataset):
@@ -105,7 +126,7 @@ class SSGAN:
         pass
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         
-        self.X_labeled, self.y_labeled,self.X_unlabeled,self.X_test,self.y_test = self._split_dataset(input_csv,labeled_ratio,test_ratio) 
+        self.X_labeled, self.y_labeled,self.X_unlabeled,self._y_unlabled,self.X_test,self.y_test = self._split_dataset(input_csv,labeled_ratio,test_ratio) 
         
         input_dim = self.X_labeled.shape[1]
         num_classes = len(np.unique(self.y_labeled))
@@ -142,11 +163,11 @@ class SSGAN:
         X_temp, X_test, y_temp, y_test = train_test_split(
             features, labels, test_size=test_ratio, stratify=labels, random_state=seed
         )
-        X_labeled, X_unlabeled, y_labeled, _ = train_test_split(
+        X_labeled, X_unlabeled, y_labeled, _y_unlabled = train_test_split(
             X_temp, y_temp, test_size=1 - labeled_ratio / (1 - test_ratio),
             stratify=y_temp, random_state=seed
         )
-        return X_labeled, y_labeled, X_unlabeled, X_test, y_test
+        return X_labeled, y_labeled, X_unlabeled,_y_unlabled, X_test, y_test
     
     def _log_sum_exp(self,x,axis = 1):
         m = torch.max(x,dim=1)[0]
@@ -189,11 +210,11 @@ class SSGAN:
         self.Goptim.step()
         return loss.data.cpu().numpy()
 
-    def _nonsemi(self,epochs):
-        for epoch in range(epochs):
-            self.D.train()
-            labeled_dataset = TabularDataset(self.X_labeled,self.y_labeled)
-            label_loader = cycle(DataLoader(labeled_dataset, batch_size = 1024, shuffle=True, drop_last=True))
+    # def _nonsemi(self,epochs):
+    #     for epoch in range(epochs):
+    #         self.D.train()
+    #         labeled_dataset = TabularDataset(self.X_labeled,self.y_labeled)
+    #         label_loader = cycle(DataLoader(labeled_dataset, batch_size = 1024, shuffle=True, drop_last=True))
                                 
     def train(self,epochs):
         unlabeled_dataset = TabularDataset(self.X_unlabeled)
@@ -260,7 +281,7 @@ class SSGAN:
         self.G.eval()
         self.D.eval()
         
-        d,l = [],[]
+        # d,l = [],[]
         
         # for (datnum,label) in zip(self.X_test.values.tolist(),self.y_test.values.tolist()):
         #     d.append(datnum)               
@@ -281,15 +302,15 @@ class SSGAN:
         self.G.eval()
         self.D.eval()
         
-        d,l = [],[]
+        # d,l = [],[]
         
-        for (datnum,label) in zip(self.X_test,self.y_test):
-            d.append(datnum)               
-            l.append(label)
+        # for (datnum,label) in zip(self.X_test,self.y_test):
+        #     d.append(datnum)               
+        #     l.append(label)
             
         X_tensor = torch.tensor(self.X_unlabeled.values,dtype=torch.float32).to(self.device)
         # peso_y = self.D(X_tensor)
-        unlabeled_loader1 = DataLoader(X_tensor,batch_size = 1024, shuffle=True, drop_last=False)
+        unlabeled_loader1 = DataLoader(X_tensor,batch_size = 1024, shuffle=False, drop_last=False)
         pesos=[]
         with torch.no_grad():
             for _,x in enumerate(unlabeled_loader1):
@@ -308,8 +329,8 @@ class SSGAN:
         # print(f1_score(y,pred,average='weighted'))
         # print(classification_report(y,pred))
     
-    def C45TreeBuild(self):
-        peso_y = self.get_pesolabel("pkls/2025-07-30 00:33:13_Generator.pkl","pkls/2025-07-30 00:33:13_Discrinator.pkl")
+    def _semi_C45TreeBuild(self,D_pkl =None, G_pkl=None):# 
+        peso_y = self.get_pesolabel(G_pkl=G_pkl,D_pkl=D_pkl)
         X_combined = pd.concat([self.X_labeled,self.X_unlabeled],ignore_index=True)
         
         y_labeled = F.one_hot(torch.tensor(self.y_labeled.tolist())).tolist()
@@ -343,7 +364,7 @@ class SSGAN:
         print("📊 C4.5 Classification Report:")
         print(classification_report(self.y_test.to_numpy(), y_pred))
         
-    def TreeBuild_simpleWeight(self):
+    def _semi_TreeBuild_simpleWeight(self):# 转换成weight的模式
         peso_y = self.get_pesolabel("pkls/2025-07-30 00:33:13_Generator.pkl","pkls/2025-07-30 00:33:13_Discrinator.pkl")
         X_combined = pd.concat([self.X_labeled,self.X_unlabeled],ignore_index=True)
         
@@ -368,15 +389,75 @@ class SSGAN:
         # y_pred = np.argmax(y_pred,axis=1)
         print("📊 C4.5 Classification Report:")
         print(classification_report(self.y_test.to_numpy(), y_pred))
+        
+    def _semi_SoftLableTree(self):# regression method
+        pass
+        peso_y = self.get_pesolabel("pkls/2025-07-30 00:33:13_Generator.pkl","pkls/2025-07-30 00:33:13_Discrinator.pkl")
+        X_combined = pd.concat([self.X_labeled,self.X_unlabeled],ignore_index=True)
+        
+        y_labeled = F.one_hot(torch.tensor(self.y_labeled.tolist())).tolist()
+        # y_combined = pd.concat([pd.Series(y_labeled),pd.Series(peso_y.tolist())],ignore_index=True)
+        y_combined = np.array(y_labeled+peso_y.tolist())
+        
+        reg = DecisionTreeRegressor()
+        reg.fit(X_combined,y_combined)
+        pred_proba = reg.predict(self.X_test.to_numpy())
+        y_pred = pred_proba.argmax(axis=1)
+        print("📊 C4.5 Classification Report:")
+        print(classification_report(self.y_test.to_numpy(), y_pred))
+        
+    def _supervise_CART(self):
+        reg = DecisionTreeRegressor()
+        reg.fit(self.X_labeled,self.y_labeled)
+        pred_proba = reg.predict(self.X_test.to_numpy())
+        y_pred = pred_proba.astype(int)
+        print("📊 CART Classification Report:")
+        print(classification_report(self.y_test.to_numpy(), y_pred))
+        
+    def _supervised_softlabel(self): # 只使用有标签数据，基于自己实现的SoftCART
+        # peso_y = self.get_pesolabel("pkls/2025-07-30 00:33:13_Generator.pkl","pkls/2025-07-30 00:33:13_Discrinator.pkl")
+        
+        X_combined = pd.concat([self.X_labeled],ignore_index=True)
+        y_labeled = F.one_hot(torch.tensor(self.y_labeled.tolist())).tolist()
+        y_combined = np.array(y_labeled)
+        
+        softtree = SoftCARTClassifier(8)
+        softtree.fit(X_combined.to_numpy(),y_combined)
+        
+        y_pred = softtree.predict(self.X_test.to_numpy())
+        print("📊 Soft CART Classification Report:")
+        print(classification_report(self.y_test.to_numpy(), y_pred))
+        
+    def _semi_softlabel(self,D_pkl =None, G_pkl=None): # 手动实现 soft label CART 
+        peso_y = self.get_pesolabel(G_pkl=G_pkl,D_pkl=D_pkl)
+        X_combined = pd.concat([self.X_labeled,self.X_unlabeled],ignore_index=True)
+        y_labeled = F.one_hot(torch.tensor(self.y_labeled.tolist())).tolist()
+        y_combined = np.array(y_labeled+peso_y.tolist())
+        
+        
+        softtree = SoftCARTClassifier(8)
+        softtree.fit(X_combined.to_numpy(),y_combined)
+        
+        y_pred = softtree.predict(self.X_test.to_numpy())
+        print("📊 Soft CART Classification Report:")
+        print(classification_report(self.y_test.to_numpy(), y_pred))
+        
+        # softtree._tree_torule()
+        # p4_entries = softtree.export_to_p4_table_entries()
+        # for i in p4_entries:
+        #     print(i)
     
 
 
 if __name__ == '__main__':
-    pass          
+    pass  
     seed = 42 
-    ssgan = SSGAN('/sdc1/labeled_datasets/ISCX_tornotor_application_pktlevel.csv',Generator,Discriminator,labeled_ratio=0.15)
-    ssgan.train(100)
-    ssgan.eval()
+    set_seed(seed)        
+    ssgan = SSGAN('/sdc1/labeled_datasets/ISCX_tornotor_application_pktlevel.csv',Generator,Discriminator,labeled_ratio=0.01)
+    # ssgan.train(100)
+    ssgan.eval(G_pkl="pkls/2025-08-08 19:13:33_Generator.pkl",D_pkl="pkls/2025-08-08 19:13:33_Discrinator.pkl")
     # ssgan.C45TreeBuild()
     # ssgan.TreeBuild_simpleWeight()
-    
+    # ssgan._semi_SoftLableTree()
+    ssgan._supervised_softlabel()
+    # ssgan._semi_softlabel("pkls/2025-08-08 19:13:33_Discrinator.pkl","pkls/2025-08-08 19:13:33_Generator.pkl")
